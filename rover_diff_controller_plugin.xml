@@ -1,0 +1,10 @@
+<library path="rover_diff_controller">
+  <class name="rover_diff_controller/RoverDiffController"
+         type="rover_diff_controller::RoverDiffController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Differential drive controller for a rocker-bogie rover with 3 ODrive-driven wheels per side.
+      Uses median per-side wheel feedback for odometry.
+    </description>
+  </class>
+</library>

@@ -1,0 +1,53 @@
+# Complete controller config for the new controller (controller_manager + parameters).
+# Used by the simulation (rover_control.xacro, use_sim branch). The real robot still loads
+# rover_controllers/config/diff_controller.yaml (stock diff_drive_controller).
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    rover_controller:
+      type: rover_diff_controller/RoverDiffController
+
+rover_controller:
+  ros__parameters:
+    left_wheel_names: ['L_1_Wheel_Joint', 'L_2_Wheel_Joint', 'L_3_Wheel_Joint']
+    right_wheel_names: ['R_1_Wheel_Joint', 'R_2_Wheel_Joint', 'R_3_Wheel_Joint']
+    # Odometry uses the median wheel velocity of each side (robust to one slipping wheel).
+
+    wheel_radius: 0.110
+    wheel_separation: 0.728
+    left_wheel_radius_multiplier: 0.9
+    right_wheel_radius_multiplier: 0.9
+    wheel_separation_multiplier: 1.2
+
+    use_stamped_vel: true
+    cmd_vel_timeout: 0.25
+    publish_rate: 100.0
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    enable_odom_tf: false
+    pose_covariance_diagonal: [0.001, 0.001, 1.0e-3, 1.0e-3, 1.0e-3, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 1.0e-3, 1.0e-3, 1.0e-3, 0.01]
+
+    # Lifted / free-spinning wheel detection from per-wheel torque (effort) and velocity.
+    # Flags are published on ~/wheel_slip (Int8MultiArray: L_1..L_3, R_1..R_3).
+    # A flagged wheel is excluded from odometry and its command is scaled down.
+    slip_detection:
+      enabled: false
+      min_wheel_speed: 0.5      # rad/s, idle below this side-median speed
+      min_torque_ref: 0.3       # Nm, idle below this side-median |torque|
+      torque_ratio: 0.25        # flag if |torque| < ratio * side-median |torque|
+      velocity_excess: 1.5      # rad/s, flag if faster than side median by this much
+      confirm_time: 0.1         # s
+      release_time: 0.3         # s
+      command_scale: 0.5        # 0..1, multiplier on a flagged wheel's command
+
+    linear.x:
+      max_velocity: 4.5
+      min_velocity: -4.5
+      max_acceleration: 3.0
+    angular.z:
+      max_velocity: 2.8
+      min_velocity: -2.8
+      max_acceleration: 1.5
