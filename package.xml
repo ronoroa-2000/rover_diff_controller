@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Rocker-bogie aware ros2_control differential drive controller for the ODrive rover</description>
   <maintainer email="TODO@example.com">Vighnesh Deshmukh</maintainer>
-  <license>Apache-2.0</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
