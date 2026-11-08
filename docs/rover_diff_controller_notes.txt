@@ -1,0 +1,126 @@
+ROVER_DIFF_CONTROLLER - DESIGN NOTES                                  (1 / 2)
+==============================================================================
+
+1. HOW IT DIFFERS FROM THE STOCK diff_drive_controller
+------------------------------------------------------------------------------
+ - Odometry reference: stock averages the wheels on each side (mean of wheel
+   positions by default). This controller takes the MEDIAN of the wheel
+   VELOCITIES on each side.
+ - Slip handling: stock has none. This controller can detect a lifted or
+   slipping wheel from torque (effort) + velocity, drop it from odometry,
+   scale its command down and publish a per-wheel flag (~/wheel_slip).
+ - Calibration: separate left/right radius multipliers, one track-width
+   multiplier (skid-steer scrub), same meaning as the stock parameters.
+ - Scope: plain ControllerInterface, N wheels per side, velocity commands.
+   It does NOT provide chaining, jerk limits, open-loop mode,
+   publish_limited_velocity or publish_wheel_data.
+
+2. COMMAND PATH (cmd_vel -> wheel speeds)
+------------------------------------------------------------------------------
+ Effective geometry (multipliers k_L, k_R, k_s from the YAML):
+     r_L = r * k_L        r_R = r * k_R        s = separation * k_s
+
+ Rate limiting, done separately for linear v and angular w. With limits
+ [x_min, x_max], max acceleration a and period dt:
+     x_c   = clamp(x_target, x_min, x_max)
+     x_cmd = clamp(x_c, x_prev - a*dt, x_prev + a*dt)
+ A command older than cmd_vel_timeout is replaced by 0 before limiting, so a
+ lost teleop link ramps the rover to a stop at the configured deceleration.
+
+ Inverse kinematics, one speed per side [rad/s], applied to all wheels:
+     w_L = (v - w * s/2) / r_L          w_R = (v + w * s/2) / r_R
+
+3. MEDIAN ODOMETRY AND THE NUMERICAL METHODS BEHIND IT
+------------------------------------------------------------------------------
+ a) Median of n wheel velocities w_(1) <= ... <= w_(n) on one side:
+        odd n :  med = w_((n+1)/2)
+        even n:  med = ( w_(n/2) + w_(n/2+1) ) / 2
+    Computed with std::nth_element (introselect, O(n) average), no full sort,
+    and on a preallocated buffer, so there is no heap allocation in update().
+    Wheels already flagged as slipping are removed first; if every wheel on
+    a side is flagged, all of them are used.
+
+ b) Side ground speed and body twist:
+        v_L = r_L * med(w_i^left)          v_R = r_R * med(w_i^right)
+        v   = (v_R + v_L) / 2              w   = (v_R - v_L) / s
+
+ c) Pose integration, midpoint rule (2nd-order Runge-Kutta), step dt:
+        th_m = th + w*dt/2
+        x   += v * cos(th_m) * dt
+        y   += v * sin(th_m) * dt
+        th   = atan2( sin(th + w*dt), cos(th + w*dt) )     (wrapped to +-pi)
+    Exact for straight lines; local error O(dt^3) on arcs, negligible at
+    100 Hz. atan2(sin, cos) keeps the heading in (-pi, pi] without branches.
+
+ WHY MEDIAN INSTEAD OF MEAN
+ - Breakdown point: the mean moves by e/n when one wheel is off by e (no
+   bound as e grows). The median ignores up to floor((n-1)/2) bad wheels,
+   i.e. one wheel out of three. A wheel spinning free at 3x speed shifts a
+   3-wheel mean by +66%; the median does not move.
+ - Cost: for Gaussian noise the median is ~64% as efficient (2/pi), so its
+   noise std is ~1.25x (sqrt(pi/2)) that of the mean when all wheels agree.
+ - Why on VELOCITY: the median must act on rates. Wheel positions are
+   accumulated angles, so their median does not equal the median of
+   increments, and per-wheel position offsets would corrupt it.
+
+ROVER_DIFF_CONTROLLER - DESIGN NOTES                                  (2 / 2)
+==============================================================================
+
+4. HOW SLIP / LIFTED-WHEEL DETECTION WORKS  (slip_detection.enabled: true)
+------------------------------------------------------------------------------
+ Needs an 'effort' state interface per wheel (the ODrive torque estimate,
+ in Nm). Evaluated separately per side, every control cycle:
+     s_ref = median_i |w_i|              t_ref = median_i |tau_i|
+     active = (s_ref >= min_wheel_speed) AND (t_ref >= min_torque_ref)
+
+ A wheel i is a CANDIDATE when active and either condition holds:
+     unloaded (lifted, free spin):   |tau_i| < rho * t_ref
+     over-spinning (lost traction):  |w_i| - s_ref > dw
+ with rho = torque_ratio and dw = velocity_excess.
+
+ Debounce (hysteresis), per wheel, with timers t_c and t_clr:
+     candidate -> t_c += dt ; flag SET   when t_c   >= confirm_time
+     otherwise -> t_c = 0   ; flag CLEAR when t_clr >= release_time
+ Median references mean one bad wheel cannot move s_ref or t_ref.
+
+ Reaction to a flagged wheel:
+     - removed from the odometry median (section 3a)
+     - its command becomes  w_cmd,i = kappa * w_side   (kappa=command_scale)
+     - ~/wheel_slip (Int8MultiArray, left wheels first) = 1 for that wheel
+ In velocity mode a lifted wheel still reaches its commanded speed, so the
+ LOW-TORQUE test is the reliable signal; velocity excess only catches wheels
+ that really out-run the others.
+
+5. PARAMETERS TO TUNE (config/rover_diff_controller.yaml)
+------------------------------------------------------------------------------
+ slip_detection.torque_ratio   (rho, 0.25)  Main sensitivity knob. Log |tau|
+     with all wheels grounded; let r_n = smallest wheel/median ratio seen
+     in normal driving. Lift one wheel, let r_l = its ratio. Set
+     rho ~ (r_n + r_l) / 2. Too high -> false flags on lightly loaded wheels
+     (e.g. front wheel climbing); too low -> misses partial slip.
+ slip_detection.min_torque_ref (0.3 Nm)   Keep above ~3x the idle torque
+     noise RMS, else the ratio test fires on noise at low load.
+ slip_detection.min_wheel_speed (0.5 rad/s)  Above encoder/estimate dead-band
+     so standing still or creeping never triggers.
+ slip_detection.velocity_excess (1.5 rad/s)  >= ~3x std of the wheel-vs-median
+     velocity difference measured on flat ground.
+ slip_detection.confirm_time (0.1 s)  Longer than obstacle-impact torque
+     spikes (~50-100 ms) but short enough to react. release_time (0.3 s)
+     should be larger than confirm_time to avoid chatter.
+ slip_detection.command_scale  (kappa, 0.5)  1 = flag only (no action),
+     0 = stop the wheel. Lower values recover traction faster but cost thrust.
+
+ Odometry accuracy (calibrate before trusting slip data):
+   Straight run of true distance d_true, odometry d_odom:
+       k_new = k_old * d_true / d_odom        (left/right radius multipliers)
+   In-place rotation, true angle th_true (IMU/gyro), odometry th_odom:
+       s_new = s_old * th_odom / th_true      (wheel_separation_multiplier)
+   Odometry yaw is ~ 1/s, so under-reported rotation means s is too large.
+
+ Motion limits: linear.x / angular.z max_acceleration trade responsiveness
+ against wheel slip and ODrive current spikes; start low on loose terrain.
+ cmd_vel_timeout (0.25 s) must exceed the teleop publish period (a stalled
+ link stops the rover after this time). publish_rate sets odom/flag rate.
+
+ NOTE: thresholds are untuned defaults and slip detection has not yet been
+ verified on the physical rover - validate with the wheels off the ground.
